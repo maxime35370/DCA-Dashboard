@@ -4,12 +4,12 @@ import { getAuth } from 'firebase/auth';
 
 // Configuration Firebase - À REMPLACER par vos propres credentials
 const firebaseConfig = {
-  apiKey: "VOTRE_API_KEY",
-  authDomain: "votre-projet.firebaseapp.com",
-  projectId: "votre-projet-id",
-  storageBucket: "votre-projet.appspot.com",
-  messagingSenderId: "123456789",
-  appId: "votre-app-id"
+  apiKey: "AIzaSyDbuvB0RAtwh270HnfFmbcQs8q0Id01gPE",
+  authDomain: "dca-dashboard.firebaseapp.com",
+  projectId: "dca-dashboard",
+  storageBucket: "dca-dashboard.firebasestorage.app",
+  messagingSenderId: "276828580026",
+  appId: "1:276828580026:web:09c1d5c70ebb2ed6913a83"
 };
 
 // Initialisation de Firebase
