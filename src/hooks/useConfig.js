@@ -6,7 +6,8 @@ const DEFAULT_CONFIG = {
   capitalDepart: 10000,
   pourcentageUtilise: 80,
   dureeEnSemaines: 12,
-  semaineActuelle: 1
+  semaineActuelle: 1,
+  dateDepart: new Date().toISOString().split('T')[0]
 };
 
 export const useConfig = (userId) => {

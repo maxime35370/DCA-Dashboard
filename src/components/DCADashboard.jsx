@@ -3,15 +3,19 @@ import { TrendingUp, TrendingDown, Minus, DollarSign, Calendar, Percent, Refresh
 import { useAuth } from '../hooks/useAuth';
 import { useConfig } from '../hooks/useConfig';
 import { useCryptos } from '../hooks/useCryptos';
+import { usePrixHistorique } from '../hooks/usePrixHistorique';
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area } from 'recharts';
 
 export default function DCADashboard() {
   // Hooks Firebase
   const { user, loading: authLoading } = useAuth();
   const { config, updateConfig, loading: configLoading } = useConfig(user?.uid);
   const { cryptos, updateCrypto, loading: cryptosLoading } = useCryptos(user?.uid);
+  const { prixCache, loading: prixLoading, getPrixPourDate } = usePrixHistorique(user?.uid);
 
   const [ongletActif, setOngletActif] = useState('portefeuille');
   const [prixEnTempsReel, setPrixEnTempsReel] = useState({});
+  const [prixSemaine, setPrixSemaine] = useState({});
   const [chargementPrix, setChargementPrix] = useState(false);
 
   // États locaux synchronisés avec Firebase (avec debounce)
@@ -19,6 +23,7 @@ export default function DCADashboard() {
   const [pourcentageUtilise, setPourcentageUtilise] = useState(80);
   const [dureeEnSemaines, setDureeEnSemaines] = useState(12);
   const [semaineActuelle, setSemaineActuelle] = useState(1);
+  const [dateDepart, setDateDepart] = useState(new Date().toISOString().split('T')[0]);
 
   // Synchroniser les états locaux avec config Firebase
   useEffect(() => {
@@ -27,6 +32,7 @@ export default function DCADashboard() {
       setPourcentageUtilise(config.pourcentageUtilise || 80);
       setDureeEnSemaines(config.dureeEnSemaines || 12);
       setSemaineActuelle(config.semaineActuelle || 1);
+      setDateDepart(config.dateDepart || new Date().toISOString().split('T')[0]);
     }
   }, [config]);
 
@@ -39,7 +45,8 @@ export default function DCADashboard() {
         capitalDepart,
         pourcentageUtilise,
         dureeEnSemaines,
-        semaineActuelle
+        semaineActuelle,
+        dateDepart
       });
     }, 1000);
 
@@ -59,10 +66,8 @@ export default function DCADashboard() {
       
       let dateToUse;
       if (heure >= 8) {
-        // Après 8h : prix d'aujourd'hui (le plus récent disponible)
         dateToUse = now;
       } else {
-        // Avant 8h : prix de la veille
         dateToUse = new Date(now);
         dateToUse.setDate(dateToUse.getDate() - 1);
       }
@@ -93,6 +98,16 @@ export default function DCADashboard() {
       }
       
       setPrixEnTempsReel(prixData);
+      
+      // Mise à jour automatique des prix actuels dans Firebase
+      for (const crypto of cryptos) {
+        if (prixData[crypto.coinGeckoId]?.eur) {
+          const prixArrondi = Math.round(prixData[crypto.coinGeckoId].eur * 100) / 100;
+          await updateCrypto(crypto.id, {
+            prixActuel: prixArrondi
+          });
+        }
+      }
     } catch (error) {
       console.error('Erreur lors de la récupération des prix:', error);
     } finally {
@@ -108,6 +123,8 @@ export default function DCADashboard() {
       return () => clearInterval(interval);
     }
   }, [cryptos?.length]);
+
+  
 
   const capitalUtilisable = useMemo(() => {
     return (capitalDepart * pourcentageUtilise) / 100;
@@ -174,6 +191,19 @@ export default function DCADashboard() {
     return palier ? palier.label : 'Non défini';
   };
 
+  const getCoeffForCryptoPrix = (crypto, prix) => {
+    if (!crypto.paliers) return 1;
+    const palier = crypto.paliers.find(p => prix >= p.min && prix < (p.max || Infinity));
+    return palier ? palier.coeff : 1;
+  };
+
+  const getPalierLabelPrix = (crypto, prix) => {
+    if (!crypto.paliers) return 'Non défini';
+    const palier = crypto.paliers.find(p => prix >= p.min && prix < (p.max || Infinity));
+    return palier ? palier.label : 'Non défini';
+  };
+
+
   const calculsSemaine = useMemo(() => {
     if (!cryptos || cryptos.length === 0) {
       return {
@@ -189,9 +219,10 @@ export default function DCADashboard() {
     
     const detailsCryptos = cryptos.map(crypto => {
       const montantPrevu = (investissementPrevu * (crypto.repartition || 0)) / 100;
-      const coeff = getCoeffForCrypto(crypto);
+      const prixPourCalcul = prixSemaine[crypto.coinGeckoId]?.eur || crypto.prixActuel || 0;
+      const coeff = getCoeffForCryptoPrix(crypto, prixPourCalcul);
       const montantReel = montantPrevu * coeff;
-      const quantite = crypto.prixActuel ? montantReel / crypto.prixActuel : 0;
+      const quantite = prixPourCalcul ? montantReel / prixPourCalcul : 0;
       
       return {
         ...crypto,
@@ -199,7 +230,8 @@ export default function DCADashboard() {
         coeff,
         montantReel,
         quantite,
-        palierLabel: getPalierLabel(crypto)
+        prixSemaine: prixPourCalcul,
+        palierLabel: getPalierLabelPrix(crypto, prixPourCalcul)
       };
     });
 
@@ -213,7 +245,7 @@ export default function DCADashboard() {
       difference: difference,
       detailsCryptos
     };
-  }, [capitalUtilisable, dureeEnSemaines, cryptos]);
+  }, [capitalUtilisable, dureeEnSemaines, cryptos, prixSemaine]);
 
   const calculsSemaineProchaine = useMemo(() => {
     const capitalRestant = capitalUtilisable - (calculsSemaine.totalReel * semaineActuelle);
@@ -232,6 +264,117 @@ export default function DCADashboard() {
     };
   }, [capitalUtilisable, calculsSemaine.totalReel, semaineActuelle, dureeEnSemaines]);
 
+  // Calcul des dates de semaines
+  const datesSemaines = useMemo(() => {
+    const dates = [];
+    const start = new Date(dateDepart);
+    
+    // Trouver le premier lundi
+    const jour = start.getDay();
+    const diff = jour === 0 ? 1 : (jour === 1 ? 0 : 8 - jour);
+    start.setDate(start.getDate() + diff);
+    
+    for (let i = 0; i < dureeEnSemaines; i++) {
+      const date = new Date(start);
+      date.setDate(start.getDate() + (i * 7));
+      dates.push(date);
+    }
+    
+    return dates;
+  }, [dateDepart, dureeEnSemaines]);
+
+  const dateFin = datesSemaines.length > 0 ? datesSemaines[datesSemaines.length - 1] : null;
+
+
+  // Données pour les graphiques
+  const donneesGraphique = useMemo(() => {
+    return datesSemaines.map((date, index) => {
+      const semaine = index + 1;
+      const historiqueSemaine = cryptos?.reduce((total, crypto) => {
+        const achatsSemaine = crypto.historique?.filter(h => h.semaine === semaine) || [];
+        return total + achatsSemaine.reduce((sum, a) => sum + a.montant, 0);
+      }, 0) || 0;
+      
+      const investiCumule = cryptos?.reduce((total, crypto) => {
+        const achats = crypto.historique?.filter(h => h.semaine <= semaine) || [];
+        return total + achats.reduce((sum, a) => sum + a.montant, 0);
+      }, 0) || 0;
+
+      const valeurCumulee = cryptos?.reduce((total, crypto) => {
+        const achats = crypto.historique?.filter(h => h.semaine <= semaine) || [];
+        const quantite = achats.reduce((sum, a) => sum + a.quantite, 0);
+        return total + (quantite * (crypto.prixActuel || 0));
+      }, 0) || 0;
+
+      return {
+        semaine: `S${semaine}`,
+        date: date.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
+        investi: Math.round(historiqueSemaine * 100) / 100,
+        investiCumule: Math.round(investiCumule * 100) / 100,
+        valeurCumulee: Math.round(valeurCumulee * 100) / 100,
+        capitalDepart: capitalDepart
+      };
+    });
+  }, [datesSemaines, cryptos, capitalDepart]);
+
+  // Données récapitulatives par crypto
+    const recapParCrypto = useMemo(() => {
+      if (!cryptos || cryptos.length === 0) return [];
+
+      return cryptos.map(crypto => {
+        const historiqueParSemaine = datesSemaines.map((date, index) => {
+          const semaine = index + 1;
+          
+          // Achats jusqu'à cette semaine
+          const achatsJusquaSemaine = crypto.historique?.filter(h => h.semaine <= semaine) || [];
+          
+          // Quantité cumulée
+          const quantiteCumulee = achatsJusquaSemaine.reduce((sum, a) => sum + a.quantite, 0);
+          
+          // Montant investi cumulé
+          const investiCumule = achatsJusquaSemaine.reduce((sum, a) => sum + a.montant, 0);
+          
+          // Prix moyen d'achat
+          const prixMoyen = quantiteCumulee > 0 ? investiCumule / quantiteCumulee : 0;
+          
+          // Achat de cette semaine
+          const achatSemaine = crypto.historique?.find(h => h.semaine === semaine);
+          
+          return {
+            semaine,
+            date: date.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit' }),
+            dateLundi: date,
+            quantiteSemaine: achatSemaine?.quantite || 0,
+            montantSemaine: achatSemaine?.montant || 0,
+            prixAchat: achatSemaine?.prixAchat || 0,
+            quantiteCumulee,
+            investiCumule,
+            prixMoyen
+          };
+        });
+
+        return {
+          ...crypto,
+          historiqueParSemaine
+        };
+      });
+    }, [cryptos, datesSemaines]);
+
+    // Charger le prix du lundi de la semaine sélectionnée (avec cache)
+    useEffect(() => {
+      const chargerPrixSemaine = async () => {
+        if (datesSemaines.length > 0 && semaineActuelle >= 1 && cryptos?.length > 0) {
+          const dateLundi = datesSemaines[semaineActuelle - 1];
+          if (dateLundi) {
+            const prix = await getPrixPourDate(cryptos, dateLundi);
+            setPrixSemaine(prix);
+          }
+        }
+      };
+
+      chargerPrixSemaine();
+    }, [semaineActuelle, datesSemaines, cryptos?.length]);
+
   // Fonction pour enregistrer les achats de la semaine
   const enregistrerAchatsSemaine = async () => {
     if (!cryptos) return;
@@ -243,7 +386,7 @@ export default function DCADashboard() {
       const nouvelAchat = {
         semaine: semaineActuelle,
         quantite: detailCrypto.quantite,
-        prixAchat: crypto.prixActuel,
+        prixAchat: detailCrypto.prixSemaine,
         montant: detailCrypto.montantReel
       };
 
@@ -254,6 +397,21 @@ export default function DCADashboard() {
     }
 
     setSemaineActuelle(prev => Math.min(dureeEnSemaines, prev + 1));
+  };
+
+  // Réinitialiser les achats d'une semaine
+  const reinitialiserSemaine = async (semaineCible) => {
+    if (!window.confirm(`Voulez-vous vraiment supprimer tous les achats de la semaine ${semaineCible} ?`)) {
+      return;
+    }
+    
+    for (const crypto of cryptos) {
+      const nouveauHistorique = crypto.historique?.filter(h => h.semaine !== semaineCible) || [];
+      await updateCrypto(crypto.id, {
+        ...crypto,
+        historique: nouveauHistorique
+      });
+    }
   };
 
   const updateCryptoRepartition = async (id, value) => {
@@ -405,6 +563,30 @@ export default function DCADashboard() {
             >
               <ShoppingCart className="w-5 h-5" />
               Investissements
+            </button>
+
+            <button
+              onClick={() => setOngletActif('graphiques')}
+              className={`flex-1 px-6 py-4 flex items-center justify-center gap-2 font-semibold transition-all ${
+                ongletActif === 'graphiques'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-slate-800/30 text-slate-400 hover:bg-slate-700/50'
+              }`}
+            >
+              <BarChart3 className="w-5 h-5" />
+              Graphiques
+            </button>
+
+            <button
+              onClick={() => setOngletActif('recapCryptos')}
+              className={`flex-1 px-6 py-4 flex items-center justify-center gap-2 font-semibold transition-all ${
+                ongletActif === 'recapCryptos'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-slate-800/30 text-slate-400 hover:bg-slate-700/50'
+              }`}
+            >
+              <PieChart className="w-5 h-5" />
+              Récap Cryptos
             </button>
           </div>
 
@@ -584,6 +766,18 @@ export default function DCADashboard() {
                       className="w-full bg-slate-600 border border-slate-500 rounded-lg px-4 py-2 text-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
                     />
                   </div>
+                  <div className="bg-slate-700/50 rounded-xl p-6">
+                    <label className="block text-sm font-medium text-slate-300 mb-2">
+                      <Calendar className="inline w-4 h-4 mr-1" />
+                      Date de départ
+                    </label>
+                    <input
+                      type="date"
+                      value={dateDepart}
+                      onChange={(e) => setDateDepart(e.target.value)}
+                      className="w-full bg-slate-600 border border-slate-500 rounded-lg px-4 py-2 text-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
@@ -600,6 +794,13 @@ export default function DCADashboard() {
                   <div className="bg-gradient-to-br from-purple-600 to-purple-700 rounded-xl p-6 shadow-lg">
                     <div className="text-purple-200 text-sm mb-1">Investissement/semaine</div>
                     <div className="text-3xl font-bold">{Math.floor(capitalUtilisable / dureeEnSemaines)} €</div>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-orange-600 to-orange-700 rounded-xl p-6 shadow-lg">
+                    <div className="text-orange-200 text-sm mb-1">Date de fin prévue</div>
+                    <div className="text-2xl font-bold">
+                      {dateFin ? dateFin.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : '-'}
+                    </div>
                   </div>
                 </div>
 
@@ -753,15 +954,25 @@ export default function DCADashboard() {
                 {/* Calculs de la semaine actuelle */}
                 <div>
                   <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-2xl font-bold">Semaine {semaineActuelle} - Investissement</h2>
+                    <h2 className="text-2xl font-bold">
+                      Semaine {semaineActuelle} - {datesSemaines[semaineActuelle - 1]?.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) || 'Investissement'}
+                    </h2>
                     {semaineActuelle <= dureeEnSemaines && (
-                      <button
-                        onClick={enregistrerAchatsSemaine}
-                        className="bg-green-600 hover:bg-green-700 px-6 py-2 rounded-lg font-semibold transition-colors flex items-center gap-2"
-                      >
-                        <TrendingUp className="w-4 h-4" />
-                        Valider les achats de la semaine
-                      </button>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={enregistrerAchatsSemaine}
+                          className="bg-green-600 hover:bg-green-700 px-6 py-2 rounded-lg font-semibold transition-colors flex items-center gap-2"
+                        >
+                          <TrendingUp className="w-4 h-4" />
+                          Valider les achats
+                        </button>
+                        <button
+                          onClick={() => reinitialiserSemaine(semaineActuelle)}
+                          className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded-lg font-semibold transition-colors flex items-center gap-2"
+                        >
+                          Réinitialiser S{semaineActuelle}
+                        </button>
+                      </div>
                     )}
                   </div>
                   
@@ -799,7 +1010,7 @@ export default function DCADashboard() {
                             </span>
                           </div>
                           <div className="text-slate-400">
-                            Prix: {(crypto.prixActuel || 0).toLocaleString('fr-FR')} €
+                            Prix ({datesSemaines[semaineActuelle - 1]?.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }) || '-'}): {(crypto.prixSemaine || 0).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €
                           </div>
                         </div>
                         
@@ -852,6 +1063,200 @@ export default function DCADashboard() {
                     <p className="text-green-200">Vous avez complété votre stratégie d'investissement sur {dureeEnSemaines} semaines.</p>
                   </div>
                 )}
+              </div>
+            )}
+            {/* Onglet Graphiques */}
+            {ongletActif === 'graphiques' && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold flex items-center gap-2">
+                  <BarChart3 className="w-6 h-6" />
+                  Analyse graphique
+                </h2>
+
+                {/* Graphique 1 : Investissement par semaine */}
+                <div className="bg-slate-700/30 rounded-xl p-6">
+                  <h3 className="text-lg font-semibold mb-4">Montant investi par semaine</h3>
+                  <ResponsiveContainer width="100%" height={300}>
+                    <BarChart data={donneesGraphique}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#475569" />
+                      <XAxis dataKey="semaine" stroke="#94a3b8" />
+                      <YAxis stroke="#94a3b8" />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569' }}
+                        labelStyle={{ color: '#f8fafc' }}
+                      />
+                      <Bar dataKey="investi" fill="#3b82f6" name="Investi (€)" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+
+                {/* Graphique 2 : Évolution cumulative */}
+                <div className="bg-slate-700/30 rounded-xl p-6">
+                  <h3 className="text-lg font-semibold mb-4">Évolution du portefeuille</h3>
+                  <ResponsiveContainer width="100%" height={300}>
+                    <ComposedChart data={donneesGraphique}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#475569" />
+                      <XAxis dataKey="semaine" stroke="#94a3b8" />
+                      <YAxis stroke="#94a3b8" />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569' }}
+                        labelStyle={{ color: '#f8fafc' }}
+                      />
+                      <Legend />
+                      <Area type="monotone" dataKey="capitalDepart" fill="#f59e0b33" stroke="#f59e0b" name="Capital de départ (€)" />
+                      <Line type="monotone" dataKey="investiCumule" stroke="#3b82f6" strokeWidth={2} name="Total investi (€)" dot={{ fill: '#3b82f6' }} />
+                      <Line type="monotone" dataKey="valeurCumulee" stroke="#10b981" strokeWidth={2} name="Valeur actuelle (€)" dot={{ fill: '#10b981' }} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+
+                {/* Tableau récapitulatif */}
+                <div className="bg-slate-700/30 rounded-xl p-6">
+                  <h3 className="text-lg font-semibold mb-4">Détail par semaine</h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-slate-600">
+                          <th className="text-left py-2 px-3">Semaine</th>
+                          <th className="text-left py-2 px-3">Date</th>
+                          <th className="text-right py-2 px-3">Investi</th>
+                          <th className="text-right py-2 px-3">Total investi</th>
+                          <th className="text-right py-2 px-3">Valeur actuelle</th>
+                          <th className="text-right py-2 px-3">+/- Value</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {donneesGraphique.map((row, idx) => (
+                          <tr key={idx} className={`border-b border-slate-700 ${idx + 1 === semaineActuelle ? 'bg-blue-600/20' : ''}`}>
+                            <td className="py-2 px-3 font-semibold">{row.semaine}</td>
+                            <td className="py-2 px-3 text-slate-400">{row.date}</td>
+                            <td className="py-2 px-3 text-right">{row.investi.toFixed(2)} €</td>
+                            <td className="py-2 px-3 text-right text-blue-400">{row.investiCumule.toFixed(2)} €</td>
+                            <td className="py-2 px-3 text-right text-green-400">{row.valeurCumulee.toFixed(2)} €</td>
+                            <td className={`py-2 px-3 text-right font-semibold ${row.valeurCumulee - row.investiCumule >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                              {row.investiCumule > 0 ? `${(row.valeurCumulee - row.investiCumule).toFixed(2)} €` : '-'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+            {/* Onglet Récap Cryptos */}
+            {ongletActif === 'recapCryptos' && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold flex items-center gap-2">
+                  <PieChart className="w-6 h-6" />
+                  Récapitulatif par crypto
+                </h2>
+
+                {recapParCrypto.map(crypto => (
+                  <div key={crypto.id} className="bg-slate-700/30 rounded-xl p-6">
+                    <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+                      {crypto.nom}
+                      <span className="text-sm font-normal text-slate-400">({crypto.repartition}%)</span>
+                    </h3>
+
+                    {/* Graphique d'évolution pour cette crypto */}
+                    <div className="mb-6">
+                      <h4 className="text-sm font-semibold text-slate-300 mb-2">Évolution du portefeuille {crypto.nom}</h4>
+                      <ResponsiveContainer width="100%" height={200}>
+                        <ComposedChart data={crypto.historiqueParSemaine}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#475569" />
+                          <XAxis dataKey="semaine" stroke="#94a3b8" tickFormatter={(val) => `S${val}`} />
+                          <YAxis stroke="#94a3b8" />
+                          <Tooltip 
+                            contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569' }}
+                            labelFormatter={(val) => `Semaine ${val}`}
+                          />
+                          <Bar dataKey="montantSemaine" fill="#3b82f6" name="Investi semaine (€)" radius={[2, 2, 0, 0]} />
+                          <Line type="monotone" dataKey="investiCumule" stroke="#10b981" strokeWidth={2} name="Total investi (€)" dot={false} />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    </div>
+
+                    {/* Tableau détaillé */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-slate-600 text-slate-400">
+                            <th className="text-left py-2 px-2">Sem.</th>
+                            <th className="text-left py-2 px-2">Date</th>
+                            <th className="text-right py-2 px-2">Prix achat</th>
+                            <th className="text-right py-2 px-2">Qté semaine</th>
+                            <th className="text-right py-2 px-2">€ semaine</th>
+                            <th className="text-right py-2 px-2">Qté totale</th>
+                            <th className="text-right py-2 px-2">€ investi</th>
+                            <th className="text-right py-2 px-2">Prix moyen</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {crypto.historiqueParSemaine.map((row, idx) => (
+                            <tr 
+                              key={idx} 
+                              className={`border-b border-slate-700/50 ${
+                                row.montantSemaine > 0 ? 'bg-green-900/10' : ''
+                              } ${idx + 1 === semaineActuelle ? 'bg-blue-600/20' : ''}`}
+                            >
+                              <td className="py-2 px-2 font-semibold">S{row.semaine}</td>
+                              <td className="py-2 px-2 text-slate-400">{row.date}</td>
+                              <td className="py-2 px-2 text-right">
+                                {row.prixAchat > 0 ? `${row.prixAchat.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €` : '-'}
+                              </td>
+                              <td className="py-2 px-2 text-right text-purple-400">
+                                {row.quantiteSemaine > 0 ? row.quantiteSemaine.toFixed(8) : '-'}
+                              </td>
+                              <td className="py-2 px-2 text-right text-blue-400">
+                                {row.montantSemaine > 0 ? `${row.montantSemaine.toFixed(2)} €` : '-'}
+                              </td>
+                              <td className="py-2 px-2 text-right text-purple-400 font-semibold">
+                                {row.quantiteCumulee > 0 ? row.quantiteCumulee.toFixed(8) : '-'}
+                              </td>
+                              <td className="py-2 px-2 text-right text-green-400 font-semibold">
+                                {row.investiCumule > 0 ? `${row.investiCumule.toFixed(2)} €` : '-'}
+                              </td>
+                              <td className="py-2 px-2 text-right text-yellow-400">
+                                {row.prixMoyen > 0 ? `${row.prixMoyen.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €` : '-'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Résumé */}
+                    {crypto.historiqueParSemaine.some(h => h.quantiteCumulee > 0) && (
+                      <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="bg-slate-600/30 rounded-lg p-3">
+                          <div className="text-xs text-slate-400">Quantité totale</div>
+                          <div className="text-lg font-bold text-purple-400">
+                            {crypto.historiqueParSemaine[crypto.historiqueParSemaine.length - 1]?.quantiteCumulee.toFixed(8) || 0}
+                          </div>
+                        </div>
+                        <div className="bg-slate-600/30 rounded-lg p-3">
+                          <div className="text-xs text-slate-400">Total investi</div>
+                          <div className="text-lg font-bold text-green-400">
+                            {crypto.historiqueParSemaine[crypto.historiqueParSemaine.length - 1]?.investiCumule.toFixed(2) || 0} €
+                          </div>
+                        </div>
+                        <div className="bg-slate-600/30 rounded-lg p-3">
+                          <div className="text-xs text-slate-400">Prix moyen</div>
+                          <div className="text-lg font-bold text-yellow-400">
+                            {crypto.historiqueParSemaine[crypto.historiqueParSemaine.length - 1]?.prixMoyen.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || 0} €
+                          </div>
+                        </div>
+                        <div className="bg-slate-600/30 rounded-lg p-3">
+                          <div className="text-xs text-slate-400">Valeur actuelle</div>
+                          <div className="text-lg font-bold text-blue-400">
+                            {((crypto.historiqueParSemaine[crypto.historiqueParSemaine.length - 1]?.quantiteCumulee || 0) * (crypto.prixActuel || 0)).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
           </div>
