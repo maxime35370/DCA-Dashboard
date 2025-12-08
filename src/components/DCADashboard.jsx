@@ -47,17 +47,52 @@ export default function DCADashboard() {
   }, [capitalDepart, pourcentageUtilise, dureeEnSemaines, semaineActuelle, user?.uid]);
 
   // Récupération des prix en temps réel depuis CoinGecko
+  // Récupération des prix (veille ou 8h si après 8h)
   const fetchPrixTempsReel = async () => {
     if (!cryptos || cryptos.length === 0) return;
     
     setChargementPrix(true);
     try {
-      const ids = cryptos.map(c => c.coinGeckoId).join(',');
-      const response = await fetch(
-        `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd,eur`
-      );
-      const data = await response.json();
-      setPrixEnTempsReel(data);
+      // Déterminer la date à utiliser
+      const now = new Date();
+      const heure = now.getHours();
+      
+      let dateToUse;
+      if (heure >= 8) {
+        // Après 8h : prix d'aujourd'hui (le plus récent disponible)
+        dateToUse = now;
+      } else {
+        // Avant 8h : prix de la veille
+        dateToUse = new Date(now);
+        dateToUse.setDate(dateToUse.getDate() - 1);
+      }
+      
+      const jour = String(dateToUse.getDate()).padStart(2, '0');
+      const mois = String(dateToUse.getMonth() + 1).padStart(2, '0');
+      const annee = dateToUse.getFullYear();
+      const dateStr = `${jour}-${mois}-${annee}`;
+      
+      // Récupérer le prix historique pour chaque crypto
+      const prixData = {};
+      for (const crypto of cryptos) {
+        try {
+          const response = await fetch(
+            `https://api.coingecko.com/api/v3/coins/${crypto.coinGeckoId}/history?date=${dateStr}`
+          );
+          const data = await response.json();
+          
+          if (data.market_data) {
+            prixData[crypto.coinGeckoId] = {
+              usd: data.market_data.current_price.usd,
+              eur: data.market_data.current_price.eur
+            };
+          }
+        } catch (err) {
+          console.error(`Erreur prix ${crypto.nom}:`, err);
+        }
+      }
+      
+      setPrixEnTempsReel(prixData);
     } catch (error) {
       console.error('Erreur lors de la récupération des prix:', error);
     } finally {
