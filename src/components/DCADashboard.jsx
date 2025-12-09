@@ -24,6 +24,8 @@ export default function DCADashboard() {
   const [dureeEnSemaines, setDureeEnSemaines] = useState(12);
   const [semaineActuelle, setSemaineActuelle] = useState(1);
   const [dateDepart, setDateDepart] = useState(new Date().toISOString().split('T')[0]);
+  const [fiboATH, setFiboATH] = useState({});
+  const [fiboLow, setFiboLow] = useState({});
 
   // Synchroniser les états locaux avec config Firebase
   useEffect(() => {
@@ -426,6 +428,131 @@ export default function DCADashboard() {
       });
     }, [cryptos, datesSemaines, prixCache]);
 
+    // Statistiques avancées
+  const statistiques = useMemo(() => {
+    if (!cryptos || cryptos.length === 0) {
+      return null;
+    }
+
+    // --- STATS GLOBALES ---
+    const totalInvesti = cryptos.reduce((sum, crypto) => {
+      return sum + (crypto.historique?.reduce((s, h) => s + h.montant, 0) || 0);
+    }, 0);
+
+    const valeurActuelle = cryptos.reduce((sum, crypto) => {
+      const quantite = crypto.historique?.reduce((s, h) => s + h.quantite, 0) || 0;
+      return sum + (quantite * (crypto.prixActuel || 0));
+    }, 0);
+
+    const roiGlobal = totalInvesti > 0 ? ((valeurActuelle - totalInvesti) / totalInvesti) * 100 : 0;
+
+    // --- ROI PAR CRYPTO ---
+    const roiParCrypto = cryptos.map(crypto => {
+      const investi = crypto.historique?.reduce((s, h) => s + h.montant, 0) || 0;
+      const quantite = crypto.historique?.reduce((s, h) => s + h.quantite, 0) || 0;
+      const valeur = quantite * (crypto.prixActuel || 0);
+      const roi = investi > 0 ? ((valeur - investi) / investi) * 100 : 0;
+      const prixMoyen = quantite > 0 ? investi / quantite : 0;
+      
+      return {
+        ...crypto,
+        investi,
+        quantite,
+        valeur,
+        roi,
+        prixMoyen
+      };
+    }).sort((a, b) => b.roi - a.roi);
+
+    // --- ÉCONOMIE DCA ---
+    // Comparer avec un achat unique au premier prix
+    const economieDCA = cryptos.map(crypto => {
+      const historique = crypto.historique || [];
+      if (historique.length === 0) return { nom: crypto.nom, economie: 0, economiePct: 0 };
+      
+      const premierPrix = historique[0]?.prixAchat || 0;
+      const quantiteTotale = historique.reduce((s, h) => s + h.quantite, 0);
+      const montantInvesti = historique.reduce((s, h) => s + h.montant, 0);
+      
+      // Si achat unique au premier prix
+      const quantiteSiAchatUnique = premierPrix > 0 ? montantInvesti / premierPrix : 0;
+      
+      // Différence de quantité
+      const differenceQuantite = quantiteTotale - quantiteSiAchatUnique;
+      const economieValeur = differenceQuantite * (crypto.prixActuel || 0);
+      const economiePct = quantiteSiAchatUnique > 0 ? (differenceQuantite / quantiteSiAchatUnique) * 100 : 0;
+      
+      return {
+        nom: crypto.nom,
+        quantiteDCA: quantiteTotale,
+        quantiteAchatUnique: quantiteSiAchatUnique,
+        differenceQuantite,
+        economieValeur,
+        economiePct,
+        premierPrix,
+        prixMoyen: quantiteTotale > 0 ? montantInvesti / quantiteTotale : 0
+      };
+    });
+
+    // --- COEFFICIENT MOYEN ---
+    const coefficientsMoyens = cryptos.map(crypto => {
+      const historique = crypto.historique || [];
+      if (historique.length === 0) return { nom: crypto.nom, coeffMoyen: 1, nbAchats: 0, distribution: {} };
+      
+      // Calculer le coefficient utilisé pour chaque achat
+      const coeffsUtilises = historique.map(h => {
+        if (!crypto.paliers) return 1;
+        const palier = crypto.paliers.find(p => h.prixAchat >= p.min && h.prixAchat < (p.max || Infinity));
+        return palier ? palier.coeff : 1;
+      });
+      
+      const coeffMoyen = coeffsUtilises.reduce((s, c) => s + c, 0) / coeffsUtilises.length;
+      
+      // Distribution par palier
+      const distribution = {};
+      historique.forEach(h => {
+        if (!crypto.paliers) return;
+        const palier = crypto.paliers.find(p => h.prixAchat >= p.min && h.prixAchat < (p.max || Infinity));
+        const label = palier?.label || 'Non défini';
+        distribution[label] = (distribution[label] || 0) + 1;
+      });
+      
+      return {
+        nom: crypto.nom,
+        coeffMoyen,
+        nbAchats: historique.length,
+        distribution
+      };
+    });
+
+    // --- RÉPARTITION RÉELLE VS PRÉVUE ---
+    const repartitionReelle = cryptos.map(crypto => {
+      const quantite = crypto.historique?.reduce((s, h) => s + h.quantite, 0) || 0;
+      const valeur = quantite * (crypto.prixActuel || 0);
+      const repartitionPrevue = crypto.repartition || 0;
+      const repartitionActuelle = valeurActuelle > 0 ? (valeur / valeurActuelle) * 100 : 0;
+      const ecart = repartitionActuelle - repartitionPrevue;
+      
+      return {
+        nom: crypto.nom,
+        repartitionPrevue,
+        repartitionActuelle,
+        ecart,
+        valeur
+      };
+    }).sort((a, b) => b.valeur - a.valeur);
+
+    return {
+      totalInvesti,
+      valeurActuelle,
+      roiGlobal,
+      roiParCrypto,
+      economieDCA,
+      coefficientsMoyens,
+      repartitionReelle
+    };
+  }, [cryptos]);
+
     // Charger le prix du lundi de la semaine sélectionnée (avec cache)
     useEffect(() => {
       const chargerPrixSemaine = async () => {
@@ -583,6 +710,56 @@ export default function DCADashboard() {
     );
   }
 
+  // Calculer les niveaux Fibonacci
+  const calculerFibonacci = (ath, low) => {
+    if (!ath || !low || ath <= low) return null;
+    
+    const range = ath - low;
+    
+    return {
+      niveau0: { pct: 0, prix: ath, label: 'ATH (0%)' },
+      niveau236: { pct: 23.6, prix: ath - (range * 0.236), label: '23.6%' },
+      niveau382: { pct: 38.2, prix: ath - (range * 0.382), label: '38.2%' },
+      niveau50: { pct: 50, prix: ath - (range * 0.5), label: '50%' },
+      niveau618: { pct: 61.8, prix: ath - (range * 0.618), label: '61.8% (Golden)' },
+      niveau786: { pct: 78.6, prix: ath - (range * 0.786), label: '78.6%' },
+      niveau100: { pct: 100, prix: low, label: 'Bas (100%)' }
+    };
+  };
+
+  // Appliquer les niveaux Fibonacci aux paliers d'une crypto
+  const appliquerFibonacci = async (cryptoId) => {
+    const crypto = cryptos?.find(c => c.id === cryptoId);
+    if (!crypto) return;
+    
+    const ath = fiboATH[cryptoId];
+    const low = fiboLow[cryptoId];
+    const fibo = calculerFibonacci(ath, low);
+    
+    if (!fibo) {
+      alert('Veuillez entrer un ATH et un point bas valides (ATH > Bas)');
+      return;
+    }
+    
+    const nouveauxPaliers = [
+      { label: 'Très très haut', min: fibo.niveau0.prix, max: Infinity, coeff: 0 },
+      { label: 'Très haut', min: fibo.niveau236.prix, max: fibo.niveau0.prix, coeff: 0.5 },
+      { label: 'Haut', min: fibo.niveau382.prix, max: fibo.niveau236.prix, coeff: 0.75 },
+      { label: 'Normal', min: fibo.niveau50.prix, max: fibo.niveau382.prix, coeff: 1 },
+      { label: 'Bas', min: fibo.niveau618.prix, max: fibo.niveau50.prix, coeff: 1.5 },
+      { label: 'Très bas', min: fibo.niveau786.prix, max: fibo.niveau618.prix, coeff: 2 },
+      { label: 'Soldes', min: fibo.niveau100.prix, max: fibo.niveau786.prix, coeff: 3 },
+      { label: 'Mega soldes', min: 0, max: fibo.niveau100.prix, coeff: 4 }
+    ];
+    
+    await updateCrypto(cryptoId, {
+      ...crypto,
+      paliers: nouveauxPaliers,
+      fiboATH: ath,
+      fiboLow: low
+    });
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
       <div className="max-w-7xl mx-auto space-y-6">
@@ -660,6 +837,17 @@ export default function DCADashboard() {
             >
               <PieChart className="w-5 h-5" />
               Récap Cryptos
+            </button>
+            <button
+              onClick={() => setOngletActif('statistiques')}
+              className={`flex-1 px-6 py-4 flex items-center justify-center gap-2 font-semibold transition-all ${
+                ongletActif === 'statistiques'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-slate-800/30 text-slate-400 hover:bg-slate-700/50'
+              }`}
+            >
+              <TrendingUp className="w-5 h-5" />
+              Statistiques
             </button>
           </div>
 
@@ -994,6 +1182,65 @@ export default function DCADashboard() {
                               </div>
                             ))}
                           </div>
+                        </div>
+                        {/* Calculateur Fibonacci */}
+                        <div className="mt-4 p-4 bg-gradient-to-r from-amber-900/30 to-orange-900/30 rounded-lg border border-amber-700/50">
+                          <h4 className="text-sm font-semibold text-amber-400 mb-3 flex items-center gap-2">
+                            📐 Calculateur Fibonacci
+                          </h4>
+                          
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                            <div>
+                              <label className="block text-xs text-slate-400 mb-1">ATH (Plus haut) - USD</label>
+                              <input
+                                type="number"
+                                value={fiboATH[crypto.id] || crypto.fiboATH || ''}
+                                onChange={(e) => setFiboATH(prev => ({ ...prev, [crypto.id]: parseFloat(e.target.value) || 0 }))}
+                                className="w-full bg-slate-700 border border-amber-600/50 rounded px-3 py-2 text-white"
+                                placeholder="Ex: 110000"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-slate-400 mb-1">Point bas - USD</label>
+                              <input
+                                type="number"
+                                value={fiboLow[crypto.id] || crypto.fiboLow || ''}
+                                onChange={(e) => setFiboLow(prev => ({ ...prev, [crypto.id]: parseFloat(e.target.value) || 0 }))}
+                                className="w-full bg-slate-700 border border-amber-600/50 rounded px-3 py-2 text-white"
+                                placeholder="Ex: 15000"
+                              />
+                            </div>
+                            <div className="flex items-end">
+                              <button
+                                onClick={() => appliquerFibonacci(crypto.id)}
+                                className="w-full bg-amber-600 hover:bg-amber-700 px-4 py-2 rounded font-semibold transition-colors"
+                              >
+                                🎯 Appliquer Fibonacci
+                              </button>
+                            </div>
+                          </div>
+                          
+                          {/* Aperçu des niveaux */}
+                          {(fiboATH[crypto.id] || crypto.fiboATH) && (fiboLow[crypto.id] || crypto.fiboLow) && (
+                            <div className="bg-slate-800/50 rounded p-3">
+                              <div className="text-xs text-slate-400 mb-2">Aperçu des niveaux :</div>
+                              <div className="grid grid-cols-4 md:grid-cols-8 gap-2 text-xs">
+                                {(() => {
+                                  const fibo = calculerFibonacci(
+                                    fiboATH[crypto.id] || crypto.fiboATH,
+                                    fiboLow[crypto.id] || crypto.fiboLow
+                                  );
+                                  if (!fibo) return null;
+                                  return Object.values(fibo).map((niveau, idx) => (
+                                    <div key={idx} className="text-center p-2 bg-slate-700/50 rounded">
+                                      <div className="text-amber-400 font-semibold">{niveau.label}</div>
+                                      <div className="text-white">${niveau.prix.toLocaleString('en-US', { maximumFractionDigits: 0 })}</div>
+                                    </div>
+                                  ));
+                                })()}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -1367,6 +1614,186 @@ export default function DCADashboard() {
                     )}
                   </div>
                 ))}
+              </div>
+            )}
+            {/* Onglet Statistiques */}
+            {ongletActif === 'statistiques' && statistiques && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold flex items-center gap-2">
+                  <TrendingUp className="w-6 h-6" />
+                  Statistiques avancées
+                </h2>
+
+                {/* ROI Global */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="bg-gradient-to-br from-blue-600 to-blue-700 rounded-xl p-6">
+                    <div className="text-blue-200 text-sm mb-1">Total investi</div>
+                    <div className="text-3xl font-bold">{statistiques.totalInvesti.toLocaleString('fr-FR', { minimumFractionDigits: 2 })} €</div>
+                  </div>
+                  <div className="bg-gradient-to-br from-purple-600 to-purple-700 rounded-xl p-6">
+                    <div className="text-purple-200 text-sm mb-1">Valeur actuelle</div>
+                    <div className="text-3xl font-bold">{statistiques.valeurActuelle.toLocaleString('fr-FR', { minimumFractionDigits: 2 })} €</div>
+                  </div>
+                  <div className={`bg-gradient-to-br rounded-xl p-6 ${statistiques.roiGlobal >= 0 ? 'from-green-600 to-green-700' : 'from-red-600 to-red-700'}`}>
+                    <div className={`text-sm mb-1 ${statistiques.roiGlobal >= 0 ? 'text-green-200' : 'text-red-200'}`}>ROI Global</div>
+                    <div className="text-3xl font-bold">{statistiques.roiGlobal >= 0 ? '+' : ''}{statistiques.roiGlobal.toFixed(2)}%</div>
+                  </div>
+                </div>
+
+                {/* ROI par crypto */}
+                <div className="bg-slate-700/30 rounded-xl p-6">
+                  <h3 className="text-lg font-semibold mb-4">📈 ROI par crypto</h3>
+                  <div className="space-y-3">
+                    {statistiques.roiParCrypto.map(crypto => (
+                      <div key={crypto.id} className="bg-slate-600/30 rounded-lg p-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="font-bold text-lg">{crypto.nom}</span>
+                          <span className={`text-xl font-bold ${crypto.roi >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {crypto.roi >= 0 ? '+' : ''}{crypto.roi?.toFixed(2) || '0.00'}%
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-4 gap-4 text-sm">
+                          <div>
+                            <div className="text-slate-400">Investi</div>
+                            <div className="font-semibold">{crypto.investi?.toFixed(2) || '0.00'} €</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-400">Valeur</div>
+                            <div className="font-semibold text-purple-400">{crypto.valeur?.toFixed(2) || '0.00'} €</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-400">Quantité</div>
+                            <div className="font-semibold text-blue-400">{crypto.quantite?.toFixed(6) || '0.000000'}</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-400">Prix moyen</div>
+                            <div className="font-semibold text-yellow-400">{crypto.prixMoyen?.toFixed(2) || '0.00'} €</div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Économie DCA */}
+                <div className="bg-slate-700/30 rounded-xl p-6">
+                  <h3 className="text-lg font-semibold mb-4">💰 Efficacité du DCA (vs achat unique au 1er prix)</h3>
+                  <div className="space-y-3">
+                    {statistiques.economieDCA.map((eco, idx) => (
+                      <div key={idx} className="bg-slate-600/30 rounded-lg p-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="font-bold">{eco.nom}</span>
+                          <span className={`font-bold ${(eco.economiePct || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {(eco.economiePct || 0) >= 0 ? '+' : ''}{eco.economiePct?.toFixed(2) || '0.00'}% de quantité
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-4 gap-4 text-sm">
+                          <div>
+                            <div className="text-slate-400">1er prix d'achat</div>
+                            <div className="font-semibold">{eco.premierPrix?.toFixed(2) || '0.00'} €</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-400">Prix moyen DCA</div>
+                            <div className="font-semibold text-yellow-400">{eco.prixMoyen?.toFixed(2) || '0.00'} €</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-400">Qté si achat unique</div>
+                            <div className="font-semibold">{eco.quantiteAchatUnique?.toFixed(6) || '0.000000'}</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-400">Qté avec DCA</div>
+                            <div className="font-semibold text-green-400">{eco.quantiteDCA?.toFixed(6) || '0.000000'}</div>
+                          </div>
+                        </div>
+                        {(eco.economieValeur || 0) !== 0 && (
+                          <div className={`mt-2 text-sm ${(eco.economieValeur || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {(eco.economieValeur || 0) >= 0 ? '🎉' : '📉'} Différence de valeur : {(eco.economieValeur || 0) >= 0 ? '+' : ''}{eco.economieValeur?.toFixed(2) || '0.00'} €
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Coefficient moyen */}
+                <div className="bg-slate-700/30 rounded-xl p-6">
+                  <h3 className="text-lg font-semibold mb-4">⚡ Coefficient moyen utilisé</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {statistiques.coefficientsMoyens.map((coef, idx) => (
+                      <div key={idx} className="bg-slate-600/30 rounded-lg p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="font-bold">{coef.nom}</span>
+                          <span className={`text-xl font-bold ${(coef.coeffMoyen || 1) > 1 ? 'text-green-400' : (coef.coeffMoyen || 1) < 1 ? 'text-orange-400' : 'text-slate-300'}`}>
+                            ×{coef.coeffMoyen?.toFixed(2) || '1.00'}
+                          </span>
+                        </div>
+                        <div className="text-sm text-slate-400 mb-2">{coef.nbAchats || 0} achats effectués</div>
+                        {coef.distribution && Object.keys(coef.distribution).length > 0 && (
+                          <div className="space-y-1">
+                            {Object.entries(coef.distribution).map(([label, count]) => (
+                              <div key={label} className="flex justify-between text-sm">
+                                <span className="text-slate-400">{label}</span>
+                                <span className="font-semibold">{count} fois</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-4 p-3 bg-slate-600/20 rounded-lg text-sm text-slate-300">
+                    💡 <strong>Interprétation :</strong> Un coefficient moyen {'>'} 1 signifie que vous avez plus souvent acheté quand les prix étaient bas (stratégie efficace !). Un coefficient {'<'} 1 signifie que vous avez plus souvent acheté quand les prix étaient hauts.
+                  </div>
+                </div>
+
+                {/* Répartition réelle vs prévue */}
+                <div className="bg-slate-700/30 rounded-xl p-6">
+                  <h3 className="text-lg font-semibold mb-4">🎯 Répartition réelle vs prévue</h3>
+                  <div className="space-y-3">
+                    {statistiques.repartitionReelle.map((rep, idx) => {
+                      const ecartAbs = Math.abs(rep.ecart || 0);
+                      const couleurEcart = ecartAbs < 2 ? 'text-green-400' : ecartAbs < 5 ? 'text-yellow-400' : 'text-red-400';
+                      
+                      return (
+                        <div key={idx} className="bg-slate-600/30 rounded-lg p-4">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-bold">{rep.nom}</span>
+                            <span className="text-slate-400">{rep.valeur?.toFixed(2) || '0.00'} €</span>
+                          </div>
+                          <div className="grid grid-cols-3 gap-4">
+                            <div>
+                              <div className="text-slate-400 text-sm">Prévue</div>
+                              <div className="font-semibold text-blue-400">{rep.repartitionPrevue?.toFixed(1) || '0.0'}%</div>
+                            </div>
+                            <div>
+                              <div className="text-slate-400 text-sm">Réelle</div>
+                              <div className="font-semibold text-purple-400">{rep.repartitionActuelle?.toFixed(1) || '0.0'}%</div>
+                            </div>
+                            <div>
+                              <div className="text-slate-400 text-sm">Écart</div>
+                              <div className={`font-semibold ${couleurEcart}`}>
+                                {(rep.ecart || 0) >= 0 ? '+' : ''}{rep.ecart?.toFixed(1) || '0.0'}%
+                              </div>
+                            </div>
+                          </div>
+                          {/* Barre de progression */}
+                          <div className="mt-3 h-2 bg-slate-700 rounded-full overflow-hidden">
+                            <div 
+                              className="h-full bg-gradient-to-r from-blue-500 to-purple-500 rounded-full"
+                              style={{ width: `${Math.min(rep.repartitionActuelle || 0, 100)}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-4 p-3 bg-slate-600/20 rounded-lg text-sm text-slate-300">
+                    💡 <strong>Interprétation :</strong> 
+                    <span className="text-green-400"> Vert</span> = écart {'<'} 2%, 
+                    <span className="text-yellow-400"> Jaune</span> = écart 2-5%, 
+                    <span className="text-red-400"> Rouge</span> = écart {'>'} 5% (rééquilibrage à considérer)
+                  </div>
+                </div>
               </div>
             )}
           </div>
