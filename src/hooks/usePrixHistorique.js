@@ -2,6 +2,21 @@ import { useState, useEffect } from 'react';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '../firebase/config';
 
+// Mapping CoinGecko ID -> Binance Symbol
+const BINANCE_SYMBOLS = {
+  'bitcoin': 'BTCEUR',
+  'ethereum': 'ETHEUR',
+  'solana': 'SOLEUR',
+  'dogecoin': 'DOGEEUR'
+};
+
+const BINANCE_SYMBOLS_USD = {
+  'bitcoin': 'BTCUSDT',
+  'ethereum': 'ETHUSDT',
+  'solana': 'SOLUSDT',
+  'dogecoin': 'DOGEUSDT'
+};
+
 export function usePrixHistorique(userId) {
   const [prixCache, setPrixCache] = useState({});
   const [loading, setLoading] = useState(false);
@@ -38,14 +53,72 @@ export function usePrixHistorique(userId) {
     }
   };
 
-  // Récupérer le prix pour une crypto à une date donnée
+  // Vider le cache
+  const viderCache = async () => {
+    if (!userId) return;
+    
+    try {
+      const docRef = doc(db, 'users', userId, 'cache', 'prixHistorique');
+      await setDoc(docRef, { prix: {} });
+      setPrixCache({});
+      console.log('🗑️ Cache vidé !');
+    } catch (error) {
+      console.error('Erreur vidage cache:', error);
+    }
+  };
+
+  // Récupérer le prix via Binance API
+  const getPrixBinance = async (coinGeckoId, date) => {
+    const symbolEur = BINANCE_SYMBOLS[coinGeckoId];
+    const symbolUsd = BINANCE_SYMBOLS_USD[coinGeckoId];
+    
+    if (!symbolEur || !symbolUsd) {
+      console.error(`Symbol Binance non trouvé pour: ${coinGeckoId}`);
+      return null;
+    }
+
+    // Timestamp du jour à minuit UTC
+    const timestamp = new Date(date);
+    timestamp.setUTCHours(0, 0, 0, 0);
+    const startTime = timestamp.getTime();
+    const endTime = startTime + 24 * 60 * 60 * 1000; // +1 jour
+
+    try {
+      // Requête EUR
+      const responseEur = await fetch(
+        `https://api.binance.com/api/v3/klines?symbol=${symbolEur}&interval=1d&startTime=${startTime}&endTime=${endTime}&limit=1`
+      );
+      const dataEur = await responseEur.json();
+
+      // Requête USD
+      const responseUsd = await fetch(
+        `https://api.binance.com/api/v3/klines?symbol=${symbolUsd}&interval=1d&startTime=${startTime}&endTime=${endTime}&limit=1`
+      );
+      const dataUsd = await responseUsd.json();
+
+      if (dataEur.length > 0 && dataUsd.length > 0) {
+        // Index 1 = prix d'ouverture, Index 4 = prix de clôture
+        // On utilise le prix d'ouverture (début de journée)
+        return {
+          eur: parseFloat(dataEur[0][1]),
+          usd: parseFloat(dataUsd[0][1])
+        };
+      }
+    } catch (error) {
+      console.error(`Erreur Binance API pour ${coinGeckoId}:`, error);
+    }
+
+    return null;
+  };
+
+  // Récupérer le prix pour une crypto à une date donnée (avec cache)
   const getPrix = async (coinGeckoId, date) => {
-    const dateStr = date.toISOString().split('T')[0]; // Format: 2025-12-08
+    const dateStr = date.toISOString().split('T')[0];
     const cacheKey = `${coinGeckoId}_${dateStr}`;
-    console.log('🔍 Recherche prix:', coinGeckoId, 'pour date:', dateStr, 'Cache:', prixCache[cacheKey] ? 'OUI' : 'NON');
 
     // Vérifier si déjà en cache
     if (prixCache[cacheKey]) {
+      console.log('✅ Cache hit:', coinGeckoId, dateStr);
       return prixCache[cacheKey];
     }
 
@@ -56,40 +129,29 @@ export function usePrixHistorique(userId) {
     dateCheck.setHours(0, 0, 0, 0);
 
     if (dateCheck > aujourdHui) {
-      return null; // Date future, pas de prix historique
+      console.log('⏭️ Date future, pas de prix:', dateStr);
+      return null;
     }
 
-    // Appeler l'API CoinGecko
-    try {
-      const jour = String(date.getDate()).padStart(2, '0');
-      const mois = String(date.getMonth() + 1).padStart(2, '0');
-      const annee = date.getFullYear();
-      const dateAPI = `${jour}-${mois}-${annee}`;
+    console.log('🔍 Appel Binance API:', coinGeckoId, dateStr);
+    
+    // Appeler l'API Binance
+    const prixData = await getPrixBinance(coinGeckoId, date);
 
-      const response = await fetch(
-        `https://api.coingecko.com/api/v3/coins/${coinGeckoId}/history?date=${dateAPI}`
-      );
-      const data = await response.json();
-
-      if (data.market_data) {
-        console.log('✅ Prix API reçu:', coinGeckoId, dateStr, data.market_data.current_price.eur);
-        const prixData = {
-          usd: data.market_data.current_price.usd,
-          eur: data.market_data.current_price.eur
-        };
-
-        // Mettre en cache
+    if (prixData) {
+      console.log('✅ Prix Binance reçu:', coinGeckoId, dateStr, 'EUR:', prixData.eur, 'USD:', prixData.usd);
+      
+      // Mettre en cache
+      setPrixCache(prevCache => {
         const nouveauCache = {
-          ...prixCache,
+          ...prevCache,
           [cacheKey]: prixData
         };
-        setPrixCache(nouveauCache);
-        await sauvegarderCache(nouveauCache);
+        sauvegarderCache(nouveauCache);
+        return nouveauCache;
+      });
 
-        return prixData;
-      }
-    } catch (error) {
-      console.error(`Erreur API prix ${coinGeckoId}:`, error);
+      return prixData;
     }
 
     return null;
@@ -107,16 +169,35 @@ export function usePrixHistorique(userId) {
       if (prix) {
         resultats[crypto.coinGeckoId] = prix;
       }
+      // Petit délai pour éviter de surcharger (même si Binance est généreux)
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
 
     setLoading(false);
     return resultats;
   };
 
+  // Pré-charger toutes les dates d'une période
+  const prechargerPeriode = async (cryptos, dates) => {
+    if (!cryptos || cryptos.length === 0 || !dates || dates.length === 0) return;
+
+    console.log(`📦 Préchargement de ${dates.length} dates pour ${cryptos.length} cryptos...`);
+    setLoading(true);
+
+    for (const date of dates) {
+      await getPrixPourDate(cryptos, date);
+    }
+
+    setLoading(false);
+    console.log('✅ Préchargement terminé !');
+  };
+
   return {
     prixCache,
     loading,
     getPrix,
-    getPrixPourDate
+    getPrixPourDate,
+    prechargerPeriode,
+    viderCache
   };
 }
